@@ -1,0 +1,276 @@
+<!DOCTYPE html>
+<html lang="pl" data-theme="dark">
+<head>
+  <meta charset="UTF-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1.0, viewport-fit=cover">
+  <title>HiperSkrypt — skrypty na Reels i TikTok</title>
+  <link rel="stylesheet" href="styles.css">
+</head>
+<body>
+
+  <!-- ===================== NAGŁÓWEK ===================== -->
+  <header class="topbar" id="topbar" hidden>
+    <button class="btn-icon" id="btn-back" title="Wstecz" hidden>←</button>
+    <div class="brand" id="brand">Hiper<span>Skrypt</span></div>
+    <div class="topbar-right">
+      <button class="btn-icon" id="btn-library" title="Biblioteka skryptów">📚</button>
+      <button class="btn-icon" id="btn-settings" title="Ustawienia">⚙️</button>
+    </div>
+  </header>
+
+  <main id="main">
+
+    <!-- ===================== ONBOARDING (BYOK) ===================== -->
+    <section class="view" id="view-onboarding" hidden>
+      <div class="onboarding-card">
+        <div class="brand brand-big">Hiper<span>Skrypt</span></div>
+        <p class="lead">Pisz skrypty na Reels i TikToki, które trzymają uwagę —
+          z pomocą AI, na Twoim własnym kluczu.</p>
+
+        <h2>Jak to działa?</h2>
+        <p>HiperSkrypt korzysta z modelu <strong>Google Gemini</strong> na zasadzie
+          <strong>BYOK</strong> („bring your own key”) — używasz własnego, darmowego
+          klucza API. Aplikacja nie ma żadnego serwera ani konta: wszystko dzieje się
+          w Twojej przeglądarce.</p>
+
+        <h2>Skąd wziąć klucz? (2 minuty)</h2>
+        <ol class="steps">
+          <li>Wejdź na <a href="https://aistudio.google.com/apikey" target="_blank" rel="noopener">Google AI Studio → API keys</a> i zaloguj się kontem Google.</li>
+          <li>Kliknij <strong>„Create API key”</strong>.</li>
+          <li>Skopiuj klucz i wklej go poniżej.</li>
+        </ol>
+
+        <label class="field-label" for="input-api-key">Twój klucz Gemini API</label>
+        <input type="password" id="input-api-key" class="input" placeholder="Wklej klucz tutaj…" autocomplete="off" spellcheck="false">
+        <p class="field-error" id="api-key-error" hidden></p>
+        <button class="btn btn-primary btn-wide" id="btn-save-key">Zapisz klucz i zaczynamy</button>
+
+        <p class="privacy-note">🔒 Twój klucz i wszystkie dane zostają wyłącznie w tej przeglądarce (localStorage) — trafiają tylko do API Google, nigdzie indziej.</p>
+      </div>
+    </section>
+
+    <!-- ===================== WYBÓR SILNIKA ===================== -->
+    <section class="view" id="view-picker" hidden>
+      <h1 class="view-title">Jaki skrypt dziś piszesz?</h1>
+      <div class="engine-grid" id="engine-grid"></div>
+      <p class="picker-hint">Masz niedokończony skrypt? <button class="btn-link" id="btn-resume-draft" hidden>Wróć do szkicu →</button></p>
+    </section>
+
+    <!-- ===================== KREATOR (kroki 0-1) ===================== -->
+    <section class="view" id="view-wizard" hidden>
+      <div class="stepper" id="stepper">
+        <span class="step" data-step="0">1 · Wywiad</span>
+        <span class="step" data-step="1">2 · Hook</span>
+        <span class="step" data-step="2">3 · Edycja</span>
+        <span class="step" data-step="3">4 · Finał</span>
+      </div>
+
+      <!-- Krok 0: wywiad -->
+      <div id="wizard-interview" hidden>
+        <h1 class="view-title" id="interview-title"></h1>
+        <div id="interview-fields"></div>
+
+        <label class="field-label">Długość docelowa</label>
+        <div class="length-picker">
+          <button class="chip" data-sec="30" type="button">30 s</button>
+          <button class="chip" data-sec="40" type="button">40 s</button>
+          <button class="chip" data-sec="60" type="button">60 s</button>
+          <input type="number" id="interview-target" class="input input-target" min="10" max="600" step="5">
+          <span class="muted small">sek.</span>
+        </div>
+
+        <p class="field-error" id="interview-error" hidden></p>
+        <button class="btn btn-primary btn-wide" id="btn-interview-next">Generuj →</button>
+        <p class="center"><button class="btn-link" id="btn-skip-manual">albo zacznij od pustego edytora (bez AI)</button></p>
+      </div>
+
+      <!-- Krok 1: wybór hooka -->
+      <div id="wizard-hooks" hidden>
+        <h1 class="view-title">Wybierz hook</h1>
+        <p class="muted center">Hook to pierwsze 1–2 zdania — decyduje, czy widz zostanie. Wybierz jeden, a AI dopisze resztę skryptu.</p>
+        <div id="hook-cards"></div>
+        <div class="hook-actions">
+          <button class="btn btn-secondary" id="btn-regen-hooks">↻ Wygeneruj 3 nowe</button>
+        </div>
+      </div>
+
+      <!-- Blokada (np. pusta biblioteka formatów dla Viral) -->
+      <div id="wizard-blocked" hidden>
+        <div class="empty-state">
+          <p class="empty-emoji">📭</p>
+          <p id="wizard-blocked-msg"></p>
+          <button class="btn btn-secondary" id="btn-blocked-back">← Wróć do wyboru silnika</button>
+        </div>
+      </div>
+
+      <!-- Ekran ładowania / błędu generacji -->
+      <div id="wizard-status" hidden>
+        <div class="gen-status">
+          <div class="spinner" id="gen-spinner"></div>
+          <p id="gen-message"></p>
+          <button class="btn btn-secondary" id="btn-gen-retry" hidden>↻ Spróbuj ponownie</button>
+          <button class="btn-link" id="btn-gen-cancel" hidden>anuluj</button>
+        </div>
+      </div>
+    </section>
+
+    <!-- ===================== EDYTOR (krok 2) ===================== -->
+    <section class="view" id="view-editor" hidden>
+      <div class="editor-head">
+        <span class="engine-badge" id="editor-engine-badge"></span>
+        <input type="text" id="editor-title" class="input input-title" placeholder="Tytuł roboczy skryptu…">
+      </div>
+
+      <div class="validation-panel" id="validation-panel" hidden></div>
+
+      <div class="editor-tools">
+        <button class="btn btn-secondary" id="btn-save-library">💾 Zapisz do biblioteki</button>
+        <button class="btn btn-secondary" id="btn-audit" hidden>🔍 Audyt retencji</button>
+      </div>
+      <div class="audit-panel" id="audit-panel" hidden></div>
+
+      <div class="block-list" id="block-list"></div>
+
+      <div class="empty-state" id="editor-empty" hidden>
+        <p class="empty-emoji">✍️</p>
+        <p><strong>Pusto tu.</strong> Dodaj pierwszy blok skryptu — zacznij od Hooka,
+          czyli pierwszych 1–2 zdań, które zatrzymują scrollowanie.</p>
+      </div>
+
+      <div class="add-block-row">
+        <button class="btn btn-secondary" id="btn-add-block">＋ Dodaj blok</button>
+        <div class="add-block-menu" id="add-block-menu" hidden></div>
+      </div>
+
+      <div class="editor-next">
+        <button class="btn btn-primary btn-wide" id="btn-finalize">Finalizuj: teleprompter + ujęcia + napisy →</button>
+      </div>
+    </section>
+
+    <!-- ===================== BIBLIOTEKA ===================== -->
+    <section class="view" id="view-library" hidden>
+      <h1 class="view-title">📚 Biblioteka skryptów</h1>
+
+      <div class="lib-toolbar">
+        <select id="lib-filter-engine" class="input input-compact">
+          <option value="all">Wszystkie silniki</option>
+          <option value="viral">🔥 Viral</option>
+          <option value="merytoryczny">🎓 Merytoryczny</option>
+          <option value="konwertujacy">🎯 Konwertujący</option>
+        </select>
+        <select id="lib-filter-status" class="input input-compact">
+          <option value="all">Każdy status</option>
+        </select>
+        <div class="lib-toolbar-right">
+          <button class="btn btn-secondary" id="btn-import">📥 Importuj</button>
+          <button class="btn btn-secondary" id="btn-export-formats">📤 Formaty</button>
+        </div>
+      </div>
+
+      <div id="lib-list"></div>
+
+      <div class="empty-state" id="lib-empty" hidden>
+        <p class="empty-emoji">📚</p>
+        <p><strong>Biblioteka jest pusta.</strong> Wygeneruj skrypt i kliknij
+          „Zapisz do biblioteki” w edytorze. Po publikacji wróć tu i uzupełnij wyniki —
+          skrypty ze statusem „działa” uczą AI Twoich najlepszych wzorców.</p>
+      </div>
+
+      <input type="file" id="import-file" accept=".json,application/json" hidden>
+    </section>
+
+    <!-- ===================== FINAŁ (krok 3) ===================== -->
+    <section class="view" id="view-final" hidden>
+      <h1 class="view-title">Gotowe do nagrania 🎬</h1>
+
+      <div class="final-tabs">
+        <button class="tab active" data-tab="teleprompter">Teleprompter</button>
+        <button class="tab" data-tab="shots">Ujęcia</button>
+        <button class="tab" data-tab="overlays">Napisy</button>
+      </div>
+
+      <div class="final-pane" id="pane-teleprompter">
+        <pre class="teleprompter" id="final-teleprompter"></pre>
+        <button class="btn btn-primary" id="btn-copy-teleprompter">📋 Kopiuj teleprompter</button>
+      </div>
+
+      <div class="final-pane" id="pane-shots" hidden>
+        <div id="final-shots"></div>
+        <button class="btn btn-secondary" id="btn-copy-shots">📋 Kopiuj shot listę</button>
+      </div>
+
+      <div class="final-pane" id="pane-overlays" hidden>
+        <div id="final-overlays"></div>
+        <button class="btn btn-secondary" id="btn-copy-overlays">📋 Kopiuj napisy</button>
+      </div>
+
+      <p class="center">
+        <button class="btn btn-secondary" id="btn-save-library-final">💾 Zapisz do biblioteki</button>
+      </p>
+      <p class="center"><button class="btn-link" id="btn-back-editor">← Wróć do edycji</button></p>
+    </section>
+
+  </main>
+
+  <!-- ===================== LICZNIK CZASU ===================== -->
+  <footer class="timerbar" id="timerbar" hidden>
+    <div class="timerbar-inner">
+      <div class="timer-main">
+        <span class="timer-time" id="timer-time">0 s</span>
+        <span class="timer-sep">/</span>
+        <span class="timer-target" id="timer-target">40 s</span>
+      </div>
+      <div class="timer-meta"><span id="timer-words">0 słów</span></div>
+      <div class="timer-warning" id="timer-warning" hidden>⚠️ Robi się długo — po ~55 s retencja zwykle spada</div>
+    </div>
+    <div class="timer-progress"><div class="timer-progress-fill" id="timer-progress-fill"></div></div>
+  </footer>
+
+  <!-- ===================== WARIANTY BLOKU (nakładka) ===================== -->
+  <div class="overlay" id="overlay-variants" hidden>
+    <div class="overlay-panel">
+      <div class="overlay-head">
+        <h2 id="variants-title">Warianty bloku</h2>
+        <button class="btn-icon" id="btn-close-variants" title="Zamknij">✕</button>
+      </div>
+      <div id="variants-body"></div>
+    </div>
+  </div>
+
+  <!-- ===================== USTAWIENIA (nakładka) ===================== -->
+  <div class="overlay" id="overlay-settings" hidden>
+    <div class="overlay-panel">
+      <div class="overlay-head">
+        <h2>Ustawienia</h2>
+        <button class="btn-icon" id="btn-close-settings" title="Zamknij">✕</button>
+      </div>
+
+      <label class="field-label" for="set-theme">Motyw</label>
+      <select id="set-theme" class="input">
+        <option value="dark">Ciemny (domyślny)</option>
+        <option value="light">Jasny</option>
+      </select>
+
+      <label class="field-label" for="set-target">Domyślna długość docelowa (sekundy)</label>
+      <input type="number" id="set-target" class="input" min="10" max="600" step="5">
+
+      <label class="field-label" for="set-wps">Tempo mowy (słów na sekundę, PL ≈ 2,3)</label>
+      <input type="number" id="set-wps" class="input" min="1" max="5" step="0.1">
+
+      <hr class="divider">
+
+      <label class="field-label">Klucz Gemini API</label>
+      <p class="muted small" id="set-key-preview"></p>
+      <button class="btn btn-secondary" id="btn-change-key">Zmień klucz API</button>
+
+      <button class="btn btn-primary btn-wide" id="btn-save-settings">Zapisz ustawienia</button>
+    </div>
+  </div>
+
+  <div class="toast" id="toast" hidden></div>
+
+  <script src="core.js"></script>
+  <script src="gemini.js"></script>
+  <script src="app.js"></script>
+</body>
+</html>
