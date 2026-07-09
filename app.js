@@ -816,7 +816,8 @@
       system: HS.PROMPTS.system(script.engine, script.targetSeconds, state.settings.wps),
       user: HS.PROMPTS.auditUser(script, state.settings.wps),
       schema: HS.PROMPTS.auditSchema,
-      temperature: 0.4
+      temperature: 0.4,
+      thinkingLevel: 'medium'
     }).then(function (data) {
       script.audit = {
         blocksHash: hash,
@@ -1370,6 +1371,15 @@
   function init() {
     if (booted) return; // strażnik: init tylko raz (podwójny DOMContentLoaded)
     booted = true;
+
+    /* Gdy Gemini jest przeciążone, pokazujemy że ponawiamy — zamiast
+     * milczącego kręcenia się spinnera. */
+    if (typeof HSGemini !== 'undefined') HSGemini.onRetry = function (info) {
+      var msg = '⏳ Serwery Gemini przeciążone — ponawiam (próba ' +
+        info.attempt + ' z ' + info.max + ')…';
+      if (!$('wizard-status').hidden) $('gen-message').textContent = msg;
+      else toast(msg);
+    };
     state.settings = store.get(K.settings, null) || HS.defaultSettings();
     store.set(K.settings, state.settings);
     state.apiKey = store.get(K.apiKey, null);

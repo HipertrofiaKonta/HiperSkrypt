@@ -2,7 +2,7 @@
  * HiperSkrypt — gemini.js
  * Warstwa wywołań Google Gemini API (JSON mode / structured output).
  * Bezpośredni fetch z przeglądarki (BYOK), bez proxy.
- * Format requestu zweryfikowany 2026-07-08 z ai.google.dev:
+ * Format requestu zweryfikowany 2026-07-08/09 z ai.google.dev:
  *   POST /v1beta/models/{model}:generateContent
  *   header x-goog-api-key, generationConfig.responseMimeType +
  *   generationConfig.responseSchema.
@@ -30,7 +30,7 @@
       return HSApiError('Przekroczony limit zapytań do Gemini (darmowa pula). Odczekaj chwilę i spróbuj ponownie.', 'quota');
     }
     if (status >= 500) {
-      return HSApiError('Serwery Google mają chwilowy problem (' + status + '). Spróbuj ponownie za moment.', 'server');
+      return HSApiError('Model Gemini jest teraz przeciążony (' + status + ') — ponowiłem próbę automatycznie, bez skutku. Odczekaj 1-2 minuty i kliknij „Spróbuj ponownie”.', 'server');
     }
     var detail = '';
     try {
@@ -90,7 +90,12 @@
       contents: [{ role: 'user', parts: [{ text: opts.user || '' }] }],
       generationConfig: {
         responseMimeType: 'application/json',
-        temperature: (opts.temperature != null ? opts.temperature : 0.9)
+        temperature: (opts.temperature != null ? opts.temperature : 0.9),
+        /* Gemini 3.x to modele "myślące" — domyślny poziom medium potrafi
+         * myśleć dziesiątki sekund. Dla krótkich zadań kreatywnych "low"
+         * jest szybkie i wystarczające (składnia REST: thinkingConfig).
+         * Zweryfikowano 2026-07-09: ai.google.dev/gemini-api/docs/thinking */
+        thinkingConfig: { thinkingLevel: opts.thinkingLevel || 'low' }
       }
     };
     if (opts.schema) body.generationConfig.responseSchema = opts.schema;
@@ -100,27 +105,51 @@
       return Promise.reject(HSApiError('Brak obsługi sieci w tym środowisku.', 'env'));
     }
 
-    return doFetch(API_BASE + model + ':generateContent', {
-      method: 'POST',
-      headers: {
-        'Content-Type': 'application/json',
-        'x-goog-api-key': opts.apiKey
-      },
-      body: JSON.stringify(body)
-    }).then(function (r) {
-      if (!r.ok) {
-        return r.text().then(function (t) { throw httpErrorMessage(r.status, t); });
-      }
-      return r.json();
-    }, function () {
-      throw HSApiError('Brak połączenia z internetem albo zapytanie zostało zablokowane. Sprawdź sieć i spróbuj ponownie.', 'network');
-    }).then(function (data) {
-      return parseJsonLoose(extractText(data));
-    });
+    /* Przejściowe błędy (503 przeciążenie, 5xx, limit 429, zrywy sieci)
+     * ponawiamy automatycznie z odczekaniem, zanim pokażemy błąd. */
+    var delays = HSGemini.RETRY_DELAYS; // ms między próbami
+    var maxAttempts = delays.length + 1;
+
+    function attempt(n) {
+      return doFetch(API_BASE + model + ':generateContent', {
+        method: 'POST',
+        headers: {
+          'Content-Type': 'application/json',
+          'x-goog-api-key': opts.apiKey
+        },
+        body: JSON.stringify(body)
+      }).then(function (r) {
+        if (!r.ok) {
+          return r.text().then(function (t) { throw httpErrorMessage(r.status, t); });
+        }
+        return r.json();
+      }, function () {
+        throw HSApiError('Brak połączenia z internetem albo zapytanie zostało zablokowane. Sprawdź sieć i spróbuj ponownie.', 'network');
+      }).then(function (data) {
+        return parseJsonLoose(extractText(data));
+      }).catch(function (err) {
+        var retryable = err && (err.kind === 'server' || err.kind === 'quota' || err.kind === 'network');
+        if (retryable && n < maxAttempts) {
+          var wait = delays[n - 1];
+          var notify = opts.onRetry || HSGemini.onRetry;
+          if (typeof notify === 'function') {
+            try { notify({ attempt: n + 1, max: maxAttempts, wait: wait, kind: err.kind }); } catch (e) { /* noop */ }
+          }
+          console.warn('[HS] Gemini ' + err.kind + ' — ponawiam próbę ' + (n + 1) + '/' + maxAttempts + ' za ' + wait + ' ms');
+          return new Promise(function (resolve) { setTimeout(resolve, wait); })
+            .then(function () { return attempt(n + 1); });
+        }
+        throw err;
+      });
+    }
+
+    return attempt(1);
   }
 
   var HSGemini = {
     call: call,
+    RETRY_DELAYS: [1500, 4000],        // odstępy automatycznych ponowień (ms)
+    onRetry: null,                     // globalny hak: UI może pokazać "ponawiam…"
     _parseJsonLoose: parseJsonLoose,   // eksport do testów
     _extractText: extractText
   };
