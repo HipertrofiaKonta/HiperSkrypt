@@ -612,3 +612,16 @@ hidden, [hidden] { display: none !important; }
 .results-grid label { font-size: .78rem; color: var(--text-muted); display: block; margin-bottom: 4px; }
 .lib-actions { display: flex; gap: 8px; flex-wrap: wrap; }
 .btn-danger { color: var(--danger); border-color: var(--danger); }
+
+/* ---------- Diagnostyka API ---------- */
+.diag-result {
+  background: var(--bg);
+  border: 1px solid var(--border);
+  border-radius: var(--radius);
+  padding: 12px 14px;
+  font-family: inherit;
+  font-size: .85rem;
+  white-space: pre-wrap;
+  margin: 10px 0 0;
+  line-height: 1.6;
+}

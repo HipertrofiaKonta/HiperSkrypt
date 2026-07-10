@@ -16,6 +16,11 @@
    * aktualny, stabilny (GA) model Flash. */
   HS.GEMINI_MODEL = 'gemini-3.5-flash';
 
+  /* Modele zapasowe: gdy główny model odpowiada uporczywym 503
+   * (przeciążenie) lub 429, aplikacja automatycznie próbuje kolejnych.
+   * Starsze modele Flash są mniej oblegane. */
+  HS.GEMINI_FALLBACK_MODELS = ['gemini-3-flash-preview', 'gemini-2.5-flash'];
+
   /* ------------------------------------------------------------------ */
 
   HS.WPS_DEFAULT = 2.3;           // słów na sekundę (język polski)

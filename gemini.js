@@ -2,42 +2,59 @@
  * HiperSkrypt — gemini.js
  * Warstwa wywołań Google Gemini API (JSON mode / structured output).
  * Bezpośredni fetch z przeglądarki (BYOK), bez proxy.
- * Format requestu zweryfikowany 2026-07-08/09 z ai.google.dev:
+ * Format zweryfikowany z ai.google.dev (2026-07):
  *   POST /v1beta/models/{model}:generateContent
- *   header x-goog-api-key, generationConfig.responseMimeType +
- *   generationConfig.responseSchema.
+ *   nagłówek x-goog-api-key; generationConfig.responseMimeType +
+ *   responseSchema; thinkingConfig.thinkingLevel (modele Gemini 3.x).
+ *
+ * Odporność:
+ *   - przejściowe błędy (503/5xx, 429, sieć) → automatyczne ponowienie,
+ *   - uporczywe przeciążenie modelu → automatyczne przejście na model
+ *     zapasowy (HS.GEMINI_FALLBACK_MODELS),
+ *   - każdy błąd niesie PEŁNĄ odpowiedź Google (błąd nie jest maskowany).
  * ========================================================================= */
 (function (global) {
   'use strict';
 
-  var API_BASE = 'https://generativelanguage.googleapis.com/v1beta/models/';
+  var API_BASE = 'https://generativelanguage.googleapis.com/v1beta/';
 
-  function HSApiError(message, kind) {
+  function HSApiError(message, kind, detail) {
     var e = new Error(message);
     e.name = 'HSApiError';
     e.kind = kind || 'generic';
+    e.detail = detail || '';
     return e;
   }
 
-  function httpErrorMessage(status, bodyText) {
-    if (status === 400 || status === 401 || status === 403) {
-      return HSApiError('Klucz API został odrzucony przez Google. Sprawdź w ustawieniach, czy klucz jest poprawny i aktywny.', 'auth');
-    }
-    if (status === 404) {
-      return HSApiError('Model „' + global.HS.GEMINI_MODEL + '” nie został znaleziony — identyfikator modelu wymaga aktualizacji (stała HS.GEMINI_MODEL w core.js).', 'model');
-    }
-    if (status === 429) {
-      return HSApiError('Przekroczony limit zapytań do Gemini (darmowa pula). Odczekaj chwilę i spróbuj ponownie.', 'quota');
-    }
-    if (status >= 500) {
-      return HSApiError('Model Gemini jest teraz przeciążony (' + status + ') — ponowiłem próbę automatycznie, bez skutku. Odczekaj 1-2 minuty i kliknij „Spróbuj ponownie”.', 'server');
-    }
-    var detail = '';
+  function googleDetail(bodyText) {
     try {
       var j = JSON.parse(bodyText);
-      if (j.error && j.error.message) detail = ' Szczegóły: ' + j.error.message;
+      if (j.error && j.error.message) return j.error.message;
     } catch (e) { /* noop */ }
-    return HSApiError('Błąd API (' + status + ').' + detail, 'http');
+    return '';
+  }
+
+  function httpErrorMessage(status, bodyText, model) {
+    var detail = googleDetail(bodyText);
+    var suffix = detail ? ' Odpowiedź Google: „' + detail + '”.' : '';
+    if (status === 401 || status === 403) {
+      return HSApiError('Klucz API został odrzucony (' + status + ').' + suffix +
+        ' Sprawdź klucz w ustawieniach i uruchom „Test połączenia”.', 'auth', detail);
+    }
+    if (status === 400) {
+      return HSApiError('Google odrzuciło zapytanie (400).' + suffix, 'badrequest', detail);
+    }
+    if (status === 404) {
+      return HSApiError('Model „' + model + '” niedostępny dla Twojego klucza (404).' + suffix +
+        ' Uruchom „Test połączenia” w ustawieniach, żeby zobaczyć dostępne modele.', 'model', detail);
+    }
+    if (status === 429) {
+      return HSApiError('Limit zapytań wyczerpany (429) dla modelu ' + model + '.' + suffix, 'quota', detail);
+    }
+    if (status >= 500) {
+      return HSApiError('Model ' + model + ' jest przeciążony (' + status + ').' + suffix, 'server', detail);
+    }
+    return HSApiError('Błąd API (' + status + ').' + suffix, 'http', detail);
   }
 
   /* Wyciąga tekst odpowiedzi z surowej struktury generateContent. */
@@ -56,9 +73,7 @@
     return text;
   }
 
-  /* Parsowanie JSON z tolerancją: czysty JSON → parse; w razie czego
-   * odcinamy płoty ```json i szukamy pierwszego { / [ …ostatniego } / ].
-   * Gdy nic z tego — czytelny błąd (nigdy crash na białym ekranie). */
+  /* Parsowanie JSON z tolerancją (płoty ```json, przedrostki tekstu). */
   function parseJsonLoose(text) {
     try { return JSON.parse(text); } catch (e) { /* dalej */ }
 
@@ -77,80 +92,185 @@
       text.slice(0, 120).replace(/\s+/g, ' ') + '…”).', 'parse');
   }
 
-  /* Główne wywołanie.
-   * opts: { apiKey, system, user, schema, temperature?, model? }
-   * Zwraca Promise<object> (sparsowany JSON) lub rzuca HSApiError. */
-  function call(opts) {
-    if (!opts || !opts.apiKey) {
-      return Promise.reject(HSApiError('Brak klucza API — dodaj go w ustawieniach.', 'auth'));
-    }
-    var model = opts.model || global.HS.GEMINI_MODEL;
+  function getFetch() {
+    if (typeof fetch === 'function') return fetch;
+    return global.fetch;
+  }
+
+  /* Jedno surowe wywołanie generateContent dla konkretnego modelu. */
+  function rawGenerate(model, opts) {
     var body = {
       system_instruction: { parts: [{ text: opts.system || '' }] },
       contents: [{ role: 'user', parts: [{ text: opts.user || '' }] }],
       generationConfig: {
         responseMimeType: 'application/json',
         temperature: (opts.temperature != null ? opts.temperature : 0.9),
-        /* Gemini 3.x to modele "myślące" — domyślny poziom medium potrafi
-         * myśleć dziesiątki sekund. Dla krótkich zadań kreatywnych "low"
-         * jest szybkie i wystarczające (składnia REST: thinkingConfig).
-         * Zweryfikowano 2026-07-09: ai.google.dev/gemini-api/docs/thinking */
-        thinkingConfig: { thinkingLevel: opts.thinkingLevel || 'low' }
+        /* Gemini 3.x: poziom rozumowania. Domyślnie "medium" — pełna
+         * jakość myślenia (składnia REST zweryfikowana:
+         * ai.google.dev/gemini-api/docs/thinking). */
+        thinkingConfig: { thinkingLevel: opts.thinkingLevel || 'medium' }
       }
     };
     if (opts.schema) body.generationConfig.responseSchema = opts.schema;
 
-    var doFetch = (typeof fetch === 'function') ? fetch : global.fetch;
-    if (typeof doFetch !== 'function') {
+    var doFetch = getFetch();
+    return doFetch(API_BASE + 'models/' + model + ':generateContent', {
+      method: 'POST',
+      headers: {
+        'Content-Type': 'application/json',
+        'x-goog-api-key': opts.apiKey
+      },
+      body: JSON.stringify(body)
+    }).then(function (r) {
+      if (!r.ok) {
+        return r.text().then(function (t) { throw httpErrorMessage(r.status, t, model); });
+      }
+      return r.json();
+    }, function () {
+      throw HSApiError('Brak połączenia z internetem albo zapytanie zostało zablokowane w sieci. Sprawdź połączenie.', 'network');
+    }).then(function (data) {
+      return parseJsonLoose(extractText(data));
+    });
+  }
+
+  /* Główne wywołanie z ponowieniami i fallbackiem modeli.
+   * opts: { apiKey, system, user, schema, temperature?, model?,
+   *         thinkingLevel?, onRetry? }
+   * Kolejność prób: [wybrany model ×(1+retry)] → [zapasowy 1] → [zapasowy 2]
+   * Zwraca Promise<object>; obiekt ma _hsModel (użyty model) gdy fallback. */
+  function call(opts) {
+    if (!opts || !opts.apiKey) {
+      return Promise.reject(HSApiError('Brak klucza API — dodaj go w ustawieniach.', 'auth'));
+    }
+    if (typeof getFetch() !== 'function') {
       return Promise.reject(HSApiError('Brak obsługi sieci w tym środowisku.', 'env'));
     }
 
-    /* Przejściowe błędy (503 przeciążenie, 5xx, limit 429, zrywy sieci)
-     * ponawiamy automatycznie z odczekaniem, zanim pokażemy błąd. */
-    var delays = HSGemini.RETRY_DELAYS; // ms między próbami
-    var maxAttempts = delays.length + 1;
+    var primary = opts.model || global.HS.GEMINI_MODEL;
+    var models = [primary];
+    (global.HS.GEMINI_FALLBACK_MODELS || []).forEach(function (m) {
+      if (models.indexOf(m) === -1) models.push(m);
+    });
 
-    function attempt(n) {
-      return doFetch(API_BASE + model + ':generateContent', {
-        method: 'POST',
-        headers: {
-          'Content-Type': 'application/json',
-          'x-goog-api-key': opts.apiKey
-        },
-        body: JSON.stringify(body)
-      }).then(function (r) {
-        if (!r.ok) {
-          return r.text().then(function (t) { throw httpErrorMessage(r.status, t); });
+    var notify = opts.onRetry || HSGemini.onRetry;
+    function tell(info) {
+      if (typeof notify === 'function') {
+        try { notify(info); } catch (e) { /* noop */ }
+      }
+    }
+
+    var mi = 0;          // indeks modelu
+    var attemptNo = 0;   // licznik prób na bieżącym modelu
+
+    function next(lastErr) {
+      /* wyczerpane modele → oddaj ostatni błąd (z detalem Google) */
+      if (mi >= models.length) {
+        if (lastErr && lastErr.kind === 'server') {
+          lastErr.message = 'Wszystkie modele Gemini odpowiadają przeciążeniem. ' +
+            lastErr.message + ' Odczekaj 1-2 minuty albo uruchom „Test połączenia” w ustawieniach.';
         }
-        return r.json();
-      }, function () {
-        throw HSApiError('Brak połączenia z internetem albo zapytanie zostało zablokowane. Sprawdź sieć i spróbuj ponownie.', 'network');
-      }).then(function (data) {
-        return parseJsonLoose(extractText(data));
+        return Promise.reject(lastErr);
+      }
+      var model = models[mi];
+      attemptNo++;
+
+      return rawGenerate(model, opts).then(function (result) {
+        if (model !== primary && result && typeof result === 'object' && !Array.isArray(result)) {
+          result._hsModel = model; // informacja dla UI: użyto modelu zapasowego
+        }
+        HSGemini.lastGoodModel = model;
+        return result;
       }).catch(function (err) {
-        var retryable = err && (err.kind === 'server' || err.kind === 'quota' || err.kind === 'network');
-        if (retryable && n < maxAttempts) {
-          var wait = delays[n - 1];
-          var notify = opts.onRetry || HSGemini.onRetry;
-          if (typeof notify === 'function') {
-            try { notify({ attempt: n + 1, max: maxAttempts, wait: wait, kind: err.kind }); } catch (e) { /* noop */ }
-          }
-          console.warn('[HS] Gemini ' + err.kind + ' — ponawiam próbę ' + (n + 1) + '/' + maxAttempts + ' za ' + wait + ' ms');
-          return new Promise(function (resolve) { setTimeout(resolve, wait); })
-            .then(function () { return attempt(n + 1); });
+        var transient = err && (err.kind === 'server' || err.kind === 'network');
+        var switchable = err && (err.kind === 'server' || err.kind === 'quota' || err.kind === 'model');
+
+        /* 1) ponów na tym samym modelu (raz), jeśli błąd przejściowy */
+        if (transient && attemptNo <= HSGemini.RETRIES_PER_MODEL) {
+          var wait = HSGemini.RETRY_DELAY_MS;
+          tell({ type: 'retry', model: model, attempt: attemptNo + 1, wait: wait, kind: err.kind });
+          console.warn('[HS] ' + model + ': ' + err.kind + ' — ponawiam za ' + wait + ' ms');
+          return new Promise(function (res) { setTimeout(res, wait); })
+            .then(function () { return next(err); });
         }
-        throw err;
+
+        /* 2) przełącz na następny model, jeśli to ma sens */
+        if (switchable && mi < models.length - 1) {
+          mi++;
+          attemptNo = 0;
+          tell({ type: 'fallback', model: models[mi], from: model, kind: err.kind });
+          console.warn('[HS] ' + model + ' niedostępny (' + err.kind + ') — przechodzę na ' + models[mi]);
+          return next(err);
+        }
+
+        /* 3) koniec — pokaż błąd z pełnym detalem Google */
+        mi = models.length;
+        return next(err);
       });
     }
 
-    return attempt(1);
+    return next(null);
+  }
+
+  /* ------------------------------------------------------------------ */
+  /* Diagnostyka: co widzi Twój klucz i co odpowiada Google              */
+  /* Zwraca Promise<{keyOk, models[], chosenAvailable, genOk, genError,   */
+  /*                 usedModel}> — nigdy nie rzuca.                       */
+  /* ------------------------------------------------------------------ */
+  function diagnose(apiKey, model) {
+    var out = {
+      keyOk: false, models: [], chosenAvailable: false,
+      genOk: false, genError: '', usedModel: model || global.HS.GEMINI_MODEL
+    };
+    var doFetch = getFetch();
+    if (!apiKey) { out.genError = 'Brak klucza API.'; return Promise.resolve(out); }
+
+    /* 1) lista modeli dostępnych dla klucza */
+    return doFetch(API_BASE + 'models?pageSize=50', {
+      headers: { 'x-goog-api-key': apiKey }
+    }).then(function (r) {
+      if (!r.ok) {
+        return r.text().then(function (t) {
+          out.genError = 'Lista modeli: HTTP ' + r.status +
+            (googleDetail(t) ? ' — „' + googleDetail(t) + '”' : '');
+          return out;
+        });
+      }
+      return r.json().then(function (data) {
+        out.keyOk = true;
+        out.models = (data.models || []).map(function (m) {
+          return String(m.name || '').replace('models/', '');
+        }).filter(function (n) { return n.indexOf('gemini') === 0; });
+        out.chosenAvailable = out.models.indexOf(out.usedModel) >= 0;
+
+        /* 2) minimalna generacja na wybranym modelu */
+        return rawGenerate(out.usedModel, {
+          apiKey: apiKey,
+          system: 'Odpowiadasz wyłącznie poprawnym JSON.',
+          user: 'Zwróć dokładnie: {"ok": true}',
+          temperature: 0,
+          thinkingLevel: 'minimal'
+        }).then(function () {
+          out.genOk = true;
+          return out;
+        }, function (e) {
+          out.genError = e.message;
+          return out;
+        });
+      });
+    }, function () {
+      out.genError = 'Nie udało się połączyć z generativelanguage.googleapis.com — sprawdź internet / blokady sieci (firewall, adblock).';
+      return out;
+    });
   }
 
   var HSGemini = {
     call: call,
-    RETRY_DELAYS: [1500, 4000],        // odstępy automatycznych ponowień (ms)
-    onRetry: null,                     // globalny hak: UI może pokazać "ponawiam…"
-    _parseJsonLoose: parseJsonLoose,   // eksport do testów
+    diagnose: diagnose,
+    RETRIES_PER_MODEL: 1,      // ile ponowień na modelu przy 503/sieci
+    RETRY_DELAY_MS: 1500,      // odstęp między ponowieniami
+    onRetry: null,             // globalny hak dla UI
+    lastGoodModel: null,
+    _parseJsonLoose: parseJsonLoose,
     _extractText: extractText
   };
 

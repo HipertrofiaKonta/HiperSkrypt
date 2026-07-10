@@ -34,6 +34,20 @@
 
   var K = HS.STORAGE_KEYS;
 
+  /* Wszystkie wywołania Gemini idą tędy: dokłada model z ustawień
+   * i pokazuje, gdy odpowiedź przyszła z modelu zapasowego. */
+  function api(opts) {
+    if (!opts.model && state.settings && state.settings.model) {
+      opts.model = state.settings.model;
+    }
+    return HSGemini.call(opts).then(function (data) {
+      if (data && data._hsModel) {
+        toast('ℹ️ Główny model przeciążony — użyto zapasowego: ' + data._hsModel);
+      }
+      return data;
+    });
+  }
+
   var state = {
     settings: null,
     apiKey: null,
@@ -319,7 +333,7 @@
     genLoading('Piszę 3 hooki pod Twój temat…');
     wiz.lastOp = generateHooks;
 
-    HSGemini.call({
+    api({
       apiKey: state.apiKey,
       system: HS.PROMPTS.system('merytoryczny', wiz.targetSeconds, state.settings.wps),
       user: HS.PROMPTS.merytHooksUser(wiz.interview),
@@ -391,7 +405,7 @@
     var fewShots = HS.fewShotExamples(library, 'merytoryczny', 2);
     logFewShots('merytoryczny', fewShots);
 
-    HSGemini.call({
+    api({
       apiKey: state.apiKey,
       system: HS.PROMPTS.system('merytoryczny', wiz.targetSeconds, state.settings.wps),
       user: HS.PROMPTS.merytScriptUser(wiz.interview, chosenHook, fewShots),
@@ -420,7 +434,7 @@
     var fewShots = HS.fewShotExamples(library, 'konwertujacy', 2);
     logFewShots('konwertujacy', fewShots);
 
-    HSGemini.call({
+    api({
       apiKey: state.apiKey,
       system: HS.PROMPTS.system('konwertujacy', wiz.targetSeconds, state.settings.wps),
       user: HS.PROMPTS.salesScriptUser(wiz.interview, fewShots),
@@ -450,7 +464,7 @@
     var fewShots = HS.fewShotExamples(library, 'viral', 2);
     logFewShots('viral', fewShots);
 
-    HSGemini.call({
+    api({
       apiKey: state.apiKey,
       system: HS.PROMPTS.system('viral', wiz.targetSeconds, state.settings.wps),
       user: HS.PROMPTS.viralScriptUser(wiz.interview, formats, fewShots),
@@ -486,7 +500,7 @@
   function rewriteFlaggedBlock(script, index, attempt) {
     var issues = HS.detectBannedPatterns(script.blocks[index].text);
     if (!issues.length) return Promise.resolve(false);
-    return HSGemini.call({
+    return api({
       apiKey: state.apiKey,
       system: HS.PROMPTS.system(script.engine, script.targetSeconds, state.settings.wps),
       user: HS.PROMPTS.rewriteBlockUser(script, index, issues),
@@ -732,7 +746,7 @@
     body.innerHTML = '<div class="gen-status"><div class="spinner"></div><p>Piszę 3 warianty…</p></div>';
     $('overlay-variants').hidden = false;
 
-    HSGemini.call({
+    api({
       apiKey: state.apiKey,
       system: HS.PROMPTS.system(script.engine, script.targetSeconds, state.settings.wps),
       user: HS.PROMPTS.regenBlockUser(script, index, state.settings.wps),
@@ -811,7 +825,7 @@
     panel.innerHTML = '<div class="gen-status"><div class="spinner"></div>' +
       '<p>Przechodzę skrypt sekunda po sekundzie…</p></div>';
 
-    HSGemini.call({
+    api({
       apiKey: state.apiKey,
       system: HS.PROMPTS.system(script.engine, script.targetSeconds, state.settings.wps),
       user: HS.PROMPTS.auditUser(script, state.settings.wps),
@@ -896,7 +910,7 @@
     setStep(3);
     genLoading('Składam finał: ujęcia i napisy…');
 
-    HSGemini.call({
+    api({
       apiKey: state.apiKey,
       system: HS.PROMPTS.system(script.engine, script.targetSeconds, state.settings.wps),
       user: HS.PROMPTS.finalUser(script),
@@ -1275,6 +1289,8 @@
     $('set-theme').value = state.settings.theme;
     $('set-target').value = state.settings.targetSeconds;
     $('set-wps').value = state.settings.wps;
+    $('set-model').value = state.settings.model || '';
+    $('diag-result').hidden = true;
     var kp = $('set-key-preview');
     kp.textContent = state.apiKey
       ? 'Zapisany klucz: ' + state.apiKey.slice(0, 6) + '…' + state.apiKey.slice(-4)
@@ -1297,11 +1313,36 @@
       state.settings.theme = $('set-theme').value === 'light' ? 'light' : 'dark';
       state.settings.targetSeconds = (t >= 10 && t <= 600) ? t : HS.DEFAULT_TARGET_SECONDS;
       state.settings.wps = (w >= 1 && w <= 5) ? w : HS.WPS_DEFAULT;
+      state.settings.model = $('set-model').value || '';
       store.set(K.settings, state.settings);
       applyTheme();
       updateTimer();
       closeSettings();
       toast('Ustawienia zapisane ✔');
+    });
+
+    $('btn-test-api').addEventListener('click', function () {
+      var box = $('diag-result');
+      box.hidden = false;
+      box.textContent = '⏳ Testuję połączenie z Google…';
+      var model = $('set-model').value || HS.GEMINI_MODEL;
+      HSGemini.diagnose(state.apiKey, model).then(function (r) {
+        var lines = [];
+        lines.push(r.keyOk
+          ? '✅ Klucz działa — Google odpowiada.'
+          : '❌ Problem z kluczem lub siecią.');
+        if (r.keyOk) {
+          lines.push(r.chosenAvailable
+            ? '✅ Model ' + r.usedModel + ' jest dostępny dla Twojego klucza.'
+            : '⚠️ Modelu ' + r.usedModel + ' NIE MA na liście Twojego klucza — to może być źródło błędów. Wybierz inny model powyżej.');
+          var flash = r.models.filter(function (m) { return m.indexOf('flash') >= 0; }).slice(0, 8);
+          if (flash.length) lines.push('Modele flash Twojego klucza:\n  • ' + flash.join('\n  • '));
+        }
+        lines.push(r.genOk
+          ? '✅ Testowa generacja przeszła — wszystko gra.'
+          : '❌ Testowa generacja nie przeszła:\n' + r.genError);
+        box.textContent = lines.join('\n');
+      });
     });
 
     $('btn-change-key').addEventListener('click', function () {
@@ -1375,8 +1416,9 @@
     /* Gdy Gemini jest przeciążone, pokazujemy że ponawiamy — zamiast
      * milczącego kręcenia się spinnera. */
     if (typeof HSGemini !== 'undefined') HSGemini.onRetry = function (info) {
-      var msg = '⏳ Serwery Gemini przeciążone — ponawiam (próba ' +
-        info.attempt + ' z ' + info.max + ')…';
+      var msg = (info.type === 'fallback')
+        ? '🔀 Model ' + info.from + ' niedostępny — próbuję zapasowego: ' + info.model + '…'
+        : '⏳ Serwery Gemini przeciążone — ponawiam próbę…';
       if (!$('wizard-status').hidden) $('gen-message').textContent = msg;
       else toast(msg);
     };
