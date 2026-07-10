@@ -16,10 +16,12 @@
    * aktualny, stabilny (GA) model Flash. */
   HS.GEMINI_MODEL = 'gemini-3.5-flash';
 
-  /* Modele zapasowe: gdy główny model odpowiada uporczywym 503
-   * (przeciążenie) lub 429, aplikacja automatycznie próbuje kolejnych.
-   * Starsze modele Flash są mniej oblegane. */
-  HS.GEMINI_FALLBACK_MODELS = ['gemini-3-flash-preview', 'gemini-2.5-flash'];
+  /* Modele zapasowe: gdy główny model odpowiada uporczywym 503/404,
+   * aplikacja automatycznie próbuje kolejnych. Aliasy *-latest to jedyne
+   * stabilne identyfikatory gwarantowane także dla NOWYCH kont Google
+   * (konkretne stare modele, np. gemini-2.5-flash, bywają dla nich
+   * zablokowane: "no longer available to new users"). */
+  HS.GEMINI_FALLBACK_MODELS = ['gemini-flash-latest', 'gemini-flash-lite-latest'];
 
   /* ------------------------------------------------------------------ */
 
@@ -667,6 +669,10 @@
       '- "risk": ryzyko odpadnięcia widza w tym bloku, liczba 1-10 (10 = prawie pewny odpad),',
       '- "why": w której sekundzie i DLACZEGO widz odpada (konkretnie: nuda, oczywistość, zbyt wolno, brak obietnicy…),',
       '- "fix": jedna konkretna poprawka (1 zdanie).',
+      'DODATKOWO dla każdego bloku z risk >= 4:',
+      '- "proposal": NOWY, gotowy do wdrożenia tekst CAŁEGO bloku — przepisany tak, żeby usunąć problem.',
+      '  Ta sama długość (±20%), język mówiony, zgodny z zasadami stylu, bez zakazanych konstrukcji.',
+      '- "whyBetter": 1 zdanie — dlaczego ta wersja zatrzyma widza lepiej niż obecna.',
       'Na końcu "summary": 1-2 zdania — najsłabszy moment całego skryptu i co poprawić najpierw.'
     ].join('\n');
   };
@@ -683,7 +689,9 @@
             block: { type: 'string' },
             risk: { type: 'integer' },
             why: { type: 'string' },
-            fix: { type: 'string' }
+            fix: { type: 'string' },
+            proposal: { type: 'string' },
+            whyBetter: { type: 'string' }
           },
           required: ['block', 'risk', 'why']
         }

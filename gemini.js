@@ -224,12 +224,44 @@
   function diagnose(apiKey, model) {
     var out = {
       keyOk: false, models: [], chosenAvailable: false,
-      genOk: false, genError: '', usedModel: model || global.HS.GEMINI_MODEL
+      usedModel: model || global.HS.GEMINI_MODEL,
+      tried: [],          // [{model, ok, error}] — realne testy generacji
+      workingModel: null, // pierwszy model, który NAPRAWDĘ odpowiedział
+      genOk: false, genError: ''
     };
     var doFetch = getFetch();
     if (!apiKey) { out.genError = 'Brak klucza API.'; return Promise.resolve(out); }
 
-    /* 1) lista modeli dostępnych dla klucza */
+    /* Kandydaci do realnego testu: wybrany model + aliasy zapasowe.
+     * Sama lista modeli NIE wystarcza — Google potrafi wylistować model,
+     * którego nowe konto nie może używać (404 przy generacji). */
+    var candidates = [out.usedModel];
+    (global.HS.GEMINI_FALLBACK_MODELS || []).forEach(function (m) {
+      if (candidates.indexOf(m) === -1) candidates.push(m);
+    });
+    candidates = candidates.slice(0, 3);
+
+    function tryCandidate(i) {
+      if (i >= candidates.length || out.workingModel) return Promise.resolve(out);
+      var m = candidates[i];
+      return rawGenerate(m, {
+        apiKey: apiKey,
+        system: 'Odpowiadasz wyłącznie poprawnym JSON.',
+        user: 'Zwróć dokładnie: {"ok": true}',
+        temperature: 0,
+        thinkingLevel: 'minimal'
+      }).then(function () {
+        out.tried.push({ model: m, ok: true, error: '' });
+        out.workingModel = m;
+        out.genOk = true;
+        return out;
+      }, function (e) {
+        out.tried.push({ model: m, ok: false, error: e.message });
+        return tryCandidate(i + 1);
+      });
+    }
+
+    /* 1) lista modeli dostępnych dla klucza (informacyjnie) */
     return doFetch(API_BASE + 'models?pageSize=50', {
       headers: { 'x-goog-api-key': apiKey }
     }).then(function (r) {
@@ -246,21 +278,8 @@
           return String(m.name || '').replace('models/', '');
         }).filter(function (n) { return n.indexOf('gemini') === 0; });
         out.chosenAvailable = out.models.indexOf(out.usedModel) >= 0;
-
-        /* 2) minimalna generacja na wybranym modelu */
-        return rawGenerate(out.usedModel, {
-          apiKey: apiKey,
-          system: 'Odpowiadasz wyłącznie poprawnym JSON.',
-          user: 'Zwróć dokładnie: {"ok": true}',
-          temperature: 0,
-          thinkingLevel: 'minimal'
-        }).then(function () {
-          out.genOk = true;
-          return out;
-        }, function (e) {
-          out.genError = e.message;
-          return out;
-        });
+        /* 2) realne testy generacji, aż znajdziemy działający model */
+        return tryCandidate(0);
       });
     }, function () {
       out.genError = 'Nie udało się połączyć z generativelanguage.googleapis.com — sprawdź internet / blokady sieci (firewall, adblock).';

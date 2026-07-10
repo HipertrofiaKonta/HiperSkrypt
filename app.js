@@ -581,22 +581,29 @@
     var blocks = state.script.blocks;
     $('editor-empty').hidden = blocks.length > 0;
 
+    var labels = HS.blockLabels(blocks);
     blocks.forEach(function (block, i) {
-      list.appendChild(renderBlock(block, i, blocks.length));
+      list.appendChild(renderBlock(block, i, blocks.length, labels[i]));
     });
     renderValidation();
     syncAuditPanel();
   }
 
-  function renderBlock(block, index, count) {
+  function renderBlock(block, index, count, label) {
     var wrap = el('div', 'block');
     wrap.dataset.blockId = block.id;
+    var auditEntry = auditEntryFor(label);
 
     var head = el('div', 'block-head');
     head.appendChild(el('span', 'block-type', block.type));
     var time = el('span', 'block-time');
     time.id = 'time-' + block.id;
     head.appendChild(time);
+    if (auditEntry) {
+      var risk = parseInt(auditEntry.risk, 10) || 0;
+      var chipCls = risk >= 7 ? 'high' : (risk >= 4 ? 'mid' : 'low');
+      head.appendChild(el('span', 'audit-chip ' + chipCls, risk + '/10'));
+    }
 
     var actions = el('div', 'block-actions');
     if (canRegen()) {
@@ -632,8 +639,11 @@
       updateBlockTime(block);
       updateTimer();
       saveDraftDebounced();
+      hideStaleAudit();
     });
     wrap.appendChild(ta);
+
+    if (auditEntry) wrap.appendChild(buildBlockAudit(auditEntry, index));
 
     requestAnimationFrame(function () { autoresize(ta); });
     setTimeout(function () { updateBlockTime(block); }, 0);
@@ -800,12 +810,94 @@
   /* FAZA 3 — audyt retencji (sekunda po sekundzie)                       */
   /* ------------------------------------------------------------------ */
 
+  /* Audyt jest "świeży", gdy hash bloków się zgadza — wtedy pokazujemy
+   * oceny i propozycje bezpośrednio przy blokach. */
+  function auditFresh() {
+    return state.script && state.script.audit &&
+      state.script.audit.blocksHash === blocksHash(state.script.blocks);
+  }
+
+  function auditEntryFor(label) {
+    if (!label || !auditFresh()) return null;
+    var hit = null;
+    (state.script.audit.blocks || []).forEach(function (r) {
+      if (r.block === label) hit = r;
+    });
+    return hit;
+  }
+
   function syncAuditPanel() {
-    var panel = $('audit-panel');
-    if (!state.script || !state.script.audit ||
-        state.script.audit.blocksHash !== blocksHash(state.script.blocks)) {
-      panel.hidden = true;
-      return;
+    if (!auditFresh()) { $('audit-panel').hidden = true; }
+  }
+
+  function hideStaleAudit() {
+    if (auditFresh()) return;
+    $('audit-panel').hidden = true;
+    document.querySelectorAll('.block-audit').forEach(function (n) { n.hidden = true; });
+    document.querySelectorAll('.block-head .audit-chip').forEach(function (n) { n.hidden = true; });
+  }
+
+  /* Aneks audytu pod treścią bloku: problem + propozycja + wdrożenie. */
+  function buildBlockAudit(entry, index) {
+    var box = el('div', 'block-audit');
+
+    var why = el('p', 'block-audit-why', entry.why || '');
+    box.appendChild(why);
+
+    if (entry.applied) {
+      box.appendChild(el('p', 'block-audit-done', '✅ Zmiana wdrożona.'));
+      return box;
+    }
+
+    if (entry.proposal && !entry.dismissed) {
+      var prop = el('div', 'audit-proposal');
+      prop.appendChild(el('div', 'audit-proposal-label', '✏️ Propozycja zmiany:'));
+      prop.appendChild(el('p', 'audit-proposal-text', entry.proposal));
+      if (entry.whyBetter) {
+        prop.appendChild(el('p', 'audit-fix', '💡 Dlaczego lepsze: ' + entry.whyBetter));
+      }
+      var row = el('div', 'lib-actions');
+      var apply = el('button', 'btn btn-primary', '✅ Wdróż zmianę');
+      apply.type = 'button';
+      apply.addEventListener('click', function () { applyAuditProposal(index, entry); });
+      var skip = el('button', 'btn-link', 'odrzuć propozycję');
+      skip.type = 'button';
+      skip.addEventListener('click', function () {
+        entry.dismissed = true;
+        saveDraft();
+        renderBlocks();
+      });
+      row.appendChild(apply);
+      row.appendChild(skip);
+      prop.appendChild(row);
+      box.appendChild(prop);
+    } else if (entry.fix && !entry.proposal) {
+      box.appendChild(el('p', 'audit-fix', '💡 ' + entry.fix));
+    }
+
+    return box;
+  }
+
+  function applyAuditProposal(index, entry) {
+    var script = state.script;
+    script.blocks[index].text = entry.proposal;
+    entry.applied = true;
+    /* hash aktualizujemy, żeby reszta audytu nie znikała po wdrożeniu */
+    script.audit.blocksHash = blocksHash(script.blocks);
+    saveDraft();
+    renderBlocks();
+    updateTimer();
+    toast('Zmiana wdrożona ✔');
+
+    /* propozycja też przechodzi przez filtr anty-AI */
+    if (state.apiKey && HS.detectBannedPatterns(script.blocks[index].text).length) {
+      toast('Filtr anty-AI poprawia wdrożony tekst…');
+      rewriteFlaggedBlock(script, index, 1).then(function () {
+        script.audit.blocksHash = blocksHash(script.blocks);
+        saveDraft();
+        renderBlocks();
+        updateTimer();
+      });
     }
   }
 
@@ -849,27 +941,24 @@
     });
   }
 
+  /* Panel na górze = tylko podsumowanie; szczegóły są przy blokach. */
   function renderAudit() {
     var panel = $('audit-panel');
     var a = state.script.audit;
     panel.hidden = false;
     panel.innerHTML = '';
     if (a.summary) panel.appendChild(el('p', 'audit-summary', '🔍 ' + a.summary));
-    a.blocks.forEach(function (r) {
-      var row = el('div', 'audit-row');
-      var risk = parseInt(r.risk, 10) || 0;
-      var cls = risk >= 7 ? 'high' : (risk >= 4 ? 'mid' : 'low');
-      row.appendChild(el('span', 'audit-chip ' + cls, risk + '/10'));
-      var body = el('div', 'audit-body');
-      body.appendChild(el('div', 'final-row-label', '//' + r.block));
-      if (r.why) body.appendChild(el('p', null, r.why));
-      if (r.fix) body.appendChild(el('p', 'audit-fix', '💡 ' + r.fix));
-      row.appendChild(body);
-      panel.appendChild(row);
-    });
+    var props = (a.blocks || []).filter(function (r) {
+      return r.proposal && !r.applied && !r.dismissed;
+    }).length;
+    panel.appendChild(el('p', 'muted small', props
+      ? 'Oceny i ' + props + ' propozycj' + (props === 1 ? 'a' : 'e') +
+        ' zmian czekają przy blokach poniżej — wdrożysz je jednym kliknięciem.'
+      : 'Oceny ryzyka znajdziesz przy poszczególnych blokach poniżej.'));
+    renderBlocks();
   }
 
-  function initAudit() {
+    function initAudit() {
     $('btn-audit').addEventListener('click', runAudit);
   }
 
@@ -1332,15 +1421,23 @@
           ? '✅ Klucz działa — Google odpowiada.'
           : '❌ Problem z kluczem lub siecią.');
         if (r.keyOk) {
-          lines.push(r.chosenAvailable
-            ? '✅ Model ' + r.usedModel + ' jest dostępny dla Twojego klucza.'
-            : '⚠️ Modelu ' + r.usedModel + ' NIE MA na liście Twojego klucza — to może być źródło błędów. Wybierz inny model powyżej.');
-          var flash = r.models.filter(function (m) { return m.indexOf('flash') >= 0; }).slice(0, 8);
-          if (flash.length) lines.push('Modele flash Twojego klucza:\n  • ' + flash.join('\n  • '));
+          lines.push('Realny test generacji (lista modeli bywa myląca):');
+          r.tried.forEach(function (t) {
+            lines.push(t.ok
+              ? '  ✅ ' + t.model + ' — DZIAŁA'
+              : '  ❌ ' + t.model + ' — ' + t.error);
+          });
+          if (r.workingModel && r.workingModel !== (r.usedModel || HS.GEMINI_MODEL)) {
+            lines.push('👉 ZALECENIE: ustaw powyżej model „' + r.workingModel +
+              '” i kliknij „Zapisz ustawienia”.');
+          } else if (r.workingModel) {
+            lines.push('👉 Wybrany model działa — wszystko gra.');
+          } else {
+            lines.push('❌ Żaden z testowanych modeli nie odpowiedział. Spróbuj za kilka minut.');
+          }
+        } else if (r.genError) {
+          lines.push('❌ ' + r.genError);
         }
-        lines.push(r.genOk
-          ? '✅ Testowa generacja przeszła — wszystko gra.'
-          : '❌ Testowa generacja nie przeszła:\n' + r.genError);
         box.textContent = lines.join('\n');
       });
     });
