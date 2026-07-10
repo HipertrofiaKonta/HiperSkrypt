@@ -104,13 +104,18 @@
       contents: [{ role: 'user', parts: [{ text: opts.user || '' }] }],
       generationConfig: {
         responseMimeType: 'application/json',
-        temperature: (opts.temperature != null ? opts.temperature : 0.9),
-        /* Gemini 3.x: poziom rozumowania. Domyślnie "medium" — pełna
-         * jakość myślenia (składnia REST zweryfikowana:
-         * ai.google.dev/gemini-api/docs/thinking). */
-        thinkingConfig: { thinkingLevel: opts.thinkingLevel || 'medium' }
+        temperature: (opts.temperature != null ? opts.temperature : 0.9)
       }
     };
+    /* thinkingLevel istnieje TYLKO w modelach Gemini 3.x — wysłanie go do
+     * modelu 2.x kończy się błędem 400. Modele 2.x zostawiamy na domyślnym
+     * (dynamicznym) myśleniu. Domyślny poziom dla 3.x: "medium" (pełna
+     * jakość rozumowania; ai.google.dev/gemini-api/docs/thinking). */
+    if (model.indexOf('gemini-3') === 0) {
+      body.generationConfig.thinkingConfig = {
+        thinkingLevel: opts.thinkingLevel || 'medium'
+      };
+    }
     if (opts.schema) body.generationConfig.responseSchema = opts.schema;
 
     var doFetch = getFetch();
